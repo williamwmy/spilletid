@@ -19,6 +19,22 @@ Ingen backend, ingen database – alt ligger i nettleseren (`localStorage`).
    trykker **Bekreft bytte** – da starter klokka til de som kommer inn.
 4. **Statistikk** – spilletid per spiller for hele turneringen, kamp for kamp.
 
+## Omganger og tilleggstid
+
+Kamplengden deles i like mange deler som du velger omganger (1–10). Klokka
+**stopper ikke** av seg selv ved omgangsslutt – dommeren avgjør når omgangen er
+over, ikke appen. I stedet:
+
+- ett tydelig lydsignal + vibrasjon når omgangstida er ute,
+- et nytt signal hvert minutt så lenge klokka får gå videre,
+- klokka blir gul og pulserer, og viser `+2:14` – synlig også på lydløs telefon.
+
+Du pauser når dommeren blåser. Merket du det først et par minutter for seint,
+får du opp **«Klokka gikk 2:14 forbi 1. omgang»** med knapper for å trekke fra
+igjen. Tida trekkes bare fra dem som står på banen, og fra «bør spille»-kvoten,
+slik at balansen blir riktig. Trekk fra det som var pause – behold det som var
+reelt spill.
+
 ## Slik jevner den ut
 
 For hvert sekund som går fordeles «bør spille»-tid på alle tilgjengelige
@@ -69,4 +85,7 @@ Netlify, Cloudflare Pages. Åpne siden på telefonen og velg
 - **Ny turnering** nullstiller spilletiden, men beholder troppen.
 - Lukker du appen mens klokka går, settes klokka på pause ved neste oppstart, og
   du får varsel om å sjekke tiden. Juster med **⋯** → *Rett opp klokka*.
+- Navn og nummer kan endres når som helst: trykk på spilleren i **Tropp**.
+- Lyd krever at du har trykket **Start** minst én gang (nettleserkrav).
+  Vibrasjon og den gule klokka virker uansett.
 - Skjermen holdes våken mens klokka går (der nettleseren støtter det).

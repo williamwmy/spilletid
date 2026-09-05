@@ -1,5 +1,5 @@
 /* Enkel offline-cache. Bump CACHE når filene endres. */
-const CACHE = 'spilletid-v1';
+const CACHE = 'spilletid-v2';
 const FILES = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'

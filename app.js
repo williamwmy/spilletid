@@ -76,6 +76,16 @@ const pnum = id => { const p = P(id); return p && p.number ? p.number : '–'; }
 function periodEnd(m) {
   return m.durationSec * clamp(m.period, 1, m.periods) / m.periods;
 }
+/* Klokka stopper aldri av seg selv. Dommeren bestemmer når omgangen er over,
+   ikke appen, så vi lar den gå og varsler i stedet. Dette er hvor langt forbi
+   omgangsskillet vi har kommet.                                            */
+function overrun(m) {
+  return Math.max(0, m.elapsed - periodEnd(m));
+}
+/* Pause mellom to omganger: klokka står, skillet er passert, mer står igjen. */
+function inBreak(m) {
+  return !m.running && !m.finished && m.period < m.periods && m.elapsed >= periodEnd(m);
+}
 function accrue(m, dt) {
   if (dt <= 0) return;
   m.elapsed += dt;
@@ -92,6 +102,31 @@ function accrue(m, dt) {
     avail.forEach(id => { m.tgt[id] = (m.tgt[id] || 0) + dt * slots * L[id].share / W; });
   }
 }
+/* Eksakt invers av accrue(). Gikk klokka videre etter at dommeren blåste,
+   må den tida trekkes fra igjen for dem som stod på banen - ellers får de
+   betalt for tid det ikke ble spilt.                                       */
+function rollback(m, dt) {
+  if (dt <= 0) return;
+  dt = Math.min(dt, m.elapsed);
+  m.elapsed -= dt;
+  const L = m.lineup;
+  let slots = 0;
+  m.onField.forEach(id => {
+    m.sec[id] = Math.max(0, (m.sec[id] || 0) - dt);
+    if (L[id] && L[id].locked) m.lock[id] = Math.max(0, (m.lock[id] || 0) - dt);
+    else slots++;
+  });
+  const avail = Object.keys(L).filter(id => L[id].share > 0 && !L[id].locked);
+  const W = avail.reduce((a, id) => a + L[id].share, 0);
+  if (W > 0 && slots > 0) {
+    avail.forEach(id => {
+      m.tgt[id] = Math.max(0, (m.tgt[id] || 0) - dt * slots * L[id].share / W);
+    });
+  }
+  m.lastSub = Math.min(m.lastSub, m.elapsed);
+  m.overChime = overrun(m) > 0 ? 1 + Math.floor(overrun(m) / 60) : 0;
+}
+
 function flush(now) {
   now = now || Date.now();
   const m = cur();
@@ -100,14 +135,13 @@ function flush(now) {
   let dt = (now - m.lastTick) / 1000;
   m.lastTick = now;
   if (dt <= 0) return;
-  const stop = periodEnd(m);
-  if (m.elapsed + dt >= stop) {
-    accrue(m, Math.max(0, stop - m.elapsed));
-    m.running = false;
-    m.atBreak = true;
-    beep();
-  } else {
-    accrue(m, dt);
+  accrue(m, dt);
+  /* Ett tydelig signal når omgangen er ute, og ett nytt hvert minutt så
+     lenge klokka får gå videre. En stoppet klokke blir ikke lagt merke til. */
+  const over = overrun(m);
+  if (over > 0) {
+    const n = 1 + Math.floor(over / 60);
+    if (n > (m.overChime || 0)) { m.overChime = n; if (n === 1) chimeEnd(); else chimeNag(); }
   }
 }
 
@@ -184,7 +218,7 @@ function newMatch(cfg) {
     onField: cfg.onField0.slice(),
     sec: {}, lock: {}, tgt: {},
     elapsed: 0, running: false, lastTick: Date.now(),
-    atBreak: false, finished: false,
+    finished: false, overChime: 0,
     lastSub: 0, nudged: false,
     log: []
   };
@@ -196,18 +230,15 @@ function toggleRun() {
   const m = cur(); if (!m || m.finished) return;
   flush();
   if (m.running) { m.running = false; releaseWake(); }
-  else {
-    if (m.elapsed >= periodEnd(m)) return;
-    m.atBreak = false; m.running = true; m.lastTick = Date.now(); requestWake();
-  }
+  else { m.running = true; m.lastTick = Date.now(); requestWake(); unlockAudio(); }
   save(); paintAll();
 }
 function nextPeriod() {
   const m = cur(); if (!m) return;
   flush();
   if (m.period >= m.periods) return;
-  m.period++; m.atBreak = false; m.lastSub = m.elapsed; m.nudged = false;
-  m.running = true; m.lastTick = Date.now(); requestWake();
+  m.period++; m.lastSub = m.elapsed; m.nudged = false; m.overChime = 0;
+  m.running = true; m.lastTick = Date.now(); requestWake(); unlockAudio();
   save(); paintAll();
 }
 function doSwap(outId, inId) {
@@ -259,8 +290,42 @@ function endMatch() {
 
 /* ============================== HJELPARAR ============================== */
 
-function beep() {
-  try { if (navigator.vibrate) navigator.vibrate([120, 60, 120]); } catch (e) {}
+/* Lyd. AudioContext må åpnes av et brukertrykk, så den vekkes i toggleRun()
+   og nextPeriod(). Vibrasjon i tillegg, for telefoner på lydløs.           */
+let ac = null;
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!ac && AC) ac = new AC();
+    if (ac && ac.state === 'suspended') ac.resume();
+  } catch (e) {}
+}
+function tone(freq, at, len, vol) {
+  if (!ac || ac.state !== 'running') return;
+  try {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    const t = ac.currentTime + at;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t); o.stop(t + len + 0.03);
+  } catch (e) {}
+}
+function buzz(pat) { try { if (navigator.vibrate) navigator.vibrate(pat); } catch (e) {} }
+
+/* Byttevarsel: kort og nøytralt. */
+function beep() { buzz([120, 60, 120]); tone(880, 0, 0.12, 0.22); }
+/* Omgangen er ute: stigende trippel, tydelig forskjellig fra byttevarselet. */
+function chimeEnd() {
+  buzz([200, 90, 200, 90, 420]);
+  [784, 988, 1319].forEach((f, i) => tone(f, i * 0.2, 0.22, 0.3));
+}
+/* Fortsatt overtid: dobbeltpip hvert minutt til noen tar tak i klokka. */
+function chimeNag() {
+  buzz([320, 130, 320]);
+  tone(1047, 0, 0.13, 0.28); tone(1047, 0.19, 0.13, 0.28);
 }
 let wake = null;
 async function requestWake() {
@@ -297,7 +362,9 @@ function paintAll() {
 function matchSig(m, pairs) {
   if (!m) return 'none';
   return [
-    m.id, m.running, m.period, m.atBreak, m.finished, m.onFieldCount, m.durationSec,
+    m.id, m.running, m.period, m.finished, m.onFieldCount, m.durationSec,
+    inBreak(m), (overrun(m) > 0 ? 'o' : ''),
+    m.elapsed >= m.durationSec - 0.5,
     m.onField.join(','), sel,
     Object.keys(m.lineup).map(id => id + (m.lineup[id].share) + (m.lineup[id].locked ? 'L' : '')).join('|'),
     pairs.map(p => (p.out || '-') + '>' + p.in).join('|'),
@@ -326,7 +393,7 @@ function matchEmptyHTML() {
   const done = S.matches.filter(x => x.finished).length;
   return '<header class="topbar"><h1>Kamp</h1></header>' +
     '<div class="card"><div class="empty">Ingen kamp i gang.' +
-    (done ? '<br><small>' + done + ' kamp' + (done > 1 ? 'ar' : '') + ' ferdigspilt i denne turneringen.</small>' : '') +
+    (done ? '<br><small>' + done + ' kamp' + (done > 1 ? 'er' : '') + ' ferdigspilt i denne turneringen.</small>' : '') +
     '</div><button class="btn primary big" data-act="tab" data-tab="setup">Sett opp ny kamp</button></div>';
 }
 
@@ -339,13 +406,14 @@ function matchHTML(m, b, pairs) {
   const pEnd = periodEnd(m);
   let ctrls;
   if (m.finished) ctrls = '';
-  else if (ftime) {
+  else if (m.running) {
+    ctrls = '<button class="btn' + (overrun(m) > 0 ? ' warn' : '') + '" data-act="run">⏸ Pause</button>';
+  } else if (inBreak(m)) {
+    ctrls = '<button class="btn primary" data-act="next-period">Start ' + (m.period + 1) + '. omgang</button>' +
+            '<button class="btn ghost" data-act="run">▶ Spill videre</button>';
+  } else if (ftime) {
     ctrls = '<button class="btn primary" data-act="end">Avslutt kamp</button>' +
-            '<button class="btn ghost" data-act="addtime">+1 min</button>';
-  } else if (m.atBreak && m.period < m.periods) {
-    ctrls = '<button class="btn primary" data-act="next-period">Start ' + (m.period + 1) + '. omgang</button>';
-  } else if (m.running) {
-    ctrls = '<button class="btn" data-act="run">⏸ Pause</button>';
+            '<button class="btn ghost" data-act="run">▶ Spill videre</button>';
   } else {
     ctrls = '<button class="btn primary" data-act="run">▶ ' + (m.elapsed > 0 ? 'Fortsett' : 'Start') + '</button>';
   }
@@ -363,6 +431,27 @@ function matchHTML(m, b, pairs) {
         '<button class="btn ghost" data-act="menu" style="flex:0 0 56px">⋯</button>' +
       '</div>' +
     '</div>';
+
+  /* ---- pause: trekk fra tid klokka gikk for mye ---- */
+  let fixcard = '';
+  if (!m.finished && !m.running && overrun(m) > 0) {
+    const o = overrun(m);
+    const steps = [15, 30, 60, 120].filter(x => x < o - 0.5);
+    const label = x => (x < 60 ? '−' + x + ' s' : '−' + (x / 60) + ' min');
+    fixcard =
+      '<div class="card fixcard">' +
+        '<div class="fhead">Klokka gikk <b class="mono">' + fmt(o) + '</b> forbi ' +
+          (m.period < m.periods ? m.period + '. omgang' : 'full tid') + '</div>' +
+        '<div class="fnote">Var noe av det pause og ikke spill? Trekk det fra de ' +
+          m.onField.length + ' som står på banen, så de ikke får betalt for tid ' +
+          'det ikke ble spilt.</div>' +
+        '<div class="rowbtns">' +
+          steps.map(x => '<button class="btn" data-act="rollback" data-d="' + x + '">' +
+            label(x) + '</button>').join('') +
+          '<button class="btn" data-act="rollback" data-d="all">−alt (' + fmt(o) + ')</button>' +
+        '</div>' +
+      '</div>';
+  }
 
   /* ---- forslag ---- */
   let sugg;
@@ -425,7 +514,7 @@ function matchHTML(m, b, pairs) {
   const addBtn = notIn.length && !m.finished
     ? '<button class="btn ghost" data-act="addplayer">Legg til spiller i kampen</button>' : '';
 
-  return clock + sugg +
+  return clock + fixcard + sugg +
     '<div class="sect"><h2>På banen (' + m.onField.length + '/' + m.onFieldCount + ')</h2>' +
       (sel ? '<span class="mmeta">Trykk på en annen spiller for å bytte</span>' : '') + '</div>' +
     '<div class="rows">' + (onF.map(id => row(id, 'field')).join('') || '<div class="empty">Ingen på banen</div>') + '</div>' +
@@ -441,17 +530,23 @@ function matchHTML(m, b, pairs) {
 
 function paintMatch(m, b, pairs) {
   const c = $('#clock'); if (!c) return;
+  const over = overrun(m);
   const left = Math.max(0, m.durationSec - m.elapsed);
-  c.textContent = S.countdown ? fmt(left) : fmt(m.elapsed);
+  c.textContent = over > 0 ? '+' + fmt(over) : (S.countdown ? fmt(left) : fmt(m.elapsed));
   c.classList.toggle('paused', !m.running);
   const pEnd = periodEnd(m);
   let sub;
   if (m.finished) sub = 'Kampen er avsluttet';
-  else if (m.elapsed >= m.durationSec - 0.5) sub = 'Full tid';
-  else if (m.atBreak) sub = 'Pause etter ' + m.period + '. omgang';
+  else if (over > 0) {
+    const what = m.period < m.periods ? m.period + '. omgang' : 'Full tid';
+    sub = m.running
+      ? what + ' er ute · spilt ' + fmt(over) + ' over — pause når dommeren blåser'
+      : what + ' · klokka gikk ' + fmt(over) + ' over';
+  } else if (inBreak(m)) sub = 'Pause etter ' + m.period + '. omgang';
   else sub = (S.countdown ? fmt(m.elapsed) + ' spilt' : fmt(left) + ' igjen') +
     (m.periods > 1 ? ' · omgangen slutter ' + fmt(pEnd) : '');
   $('#clocksub').textContent = sub;
+  c.classList.toggle('over', over > 0 && !m.finished);
   $('#pbar').style.width = clamp(m.elapsed / m.durationSec * 100, 0, 100) + '%';
 
   const ns = $('#nextsub');
@@ -516,7 +611,7 @@ function matchMenuSheet() {
   openSheet(
     '<h2>Kampen</h2><div class="shead"><div><b>' + esc(m.name) + '</b><small>' +
       Math.round(m.durationSec / 60) + ' min · ' + m.onFieldCount + ' på banen · ' +
-      m.periods + ' omgang' + (m.periods > 1 ? 'ar' : '') + '</small></div></div>' +
+      m.periods + ' omgang' + (m.periods > 1 ? 'er' : '') + '</small></div></div>' +
     '<div class="sgroup"><span>Kamplengde</span><div class="rowbtns">' +
       '<button class="btn" data-act="mm-dur" data-d="-60">−1 min</button>' +
       '<button class="btn" data-act="mm-dur" data-d="60">+1 min</button>' +
@@ -577,10 +672,11 @@ function renderSquad() {
   const b = balances();
   $('#squad-list').innerHTML = S.squad.length
     ? S.squad.map(p =>
-      '<div class="prow"><span class="num2">' + esc(p.number || '–') + '</span>' +
+      '<div class="prow tap" data-act="sq-menu" data-id="' + p.id + '">' +
+      '<span class="num2">' + esc(p.number || '–') + '</span>' +
       '<span class="who"><b>' + esc(p.name) + '</b><small>' + fmt(b[p.id] ? b[p.id].sec : 0) + ' spilt i turneringen</small></span>' +
-      '<button class="dots" data-act="sq-menu" data-id="' + p.id + '">⋯</button></div>').join('')
-    : '<div class="empty">Ingen spillere enno. Legg dem inn over.</div>';
+      '<button class="dots" data-act="sq-menu" data-id="' + p.id + '">✎</button></div>').join('')
+    : '<div class="empty">Ingen spillere ennå. Legg dem inn over.</div>';
 }
 
 function addPlayers(text, numHint) {
@@ -675,7 +771,7 @@ function readSetupNumbers() {
   };
   setup.duration = num('#s-duration', 50, 1, 120);
   setup.onField = num('#s-onfield', 7, 1, 11);
-  setup.periods = num('#s-periods', 2, 1, 4);
+  setup.periods = num('#s-periods', 2, 1, 10);
   setup.interval = num('#s-interval', 5, 1, 30);
   setup.maxSwaps = num('#s-maxswaps', 2, 1, 11);
   setup.threshold = num('#s-threshold', 60, 0, 600);
@@ -801,7 +897,13 @@ document.addEventListener('click', ev => {
     case 'clockmode': S.countdown = !S.countdown; save(); lastSig = ''; paintAll(); break;
     case 'run': toggleRun(); break;
     case 'next-period': nextPeriod(); break;
-    case 'addtime': if (m) { m.durationSec += 60; lastSig = ''; save(); paintAll(); } break;
+    case 'rollback': {
+      if (!m) break;
+      flush();
+      const o = overrun(m);
+      rollback(m, t.dataset.d === 'all' ? o : Math.min(parseInt(t.dataset.d, 10) || 0, o));
+      save(); lastSig = ''; paintAll(); break;
+    }
     case 'end':
       if (m && confirm('Avslutte «' + m.name + '»? Spilletida blir lagret i turneringen.')) endMatch();
       break;
@@ -871,8 +973,8 @@ document.addEventListener('click', ev => {
     case 'mm-clock': {
       if (!m) break;
       flush();
-      m.elapsed = clamp(m.elapsed + parseInt(t.dataset.d, 10), 0, m.durationSec);
-      if (m.elapsed < periodEnd(m)) m.atBreak = false;
+      m.elapsed = Math.max(0, m.elapsed + parseInt(t.dataset.d, 10));
+      m.overChime = overrun(m) > 0 ? 1 + Math.floor(overrun(m) / 60) : 0;
       save(); lastSig = ''; paintAll(); break;
     }
     case 'mm-rename': {

@@ -70,6 +70,18 @@ select{appearance:none}
 .mmeta{color:var(--muted);font-size:13px;white-space:nowrap}
 .clock{font-size:62px;line-height:1.05;font-weight:800;text-align:center;margin:6px 0 2px;letter-spacing:-.02em}
 .clock.paused{color:var(--muted)}
+/* Overtid: klokka skal være umulig å overse, også på lydløs telefon. */
+.clock.over{color:var(--warn);animation:overpulse 1.4s ease-in-out infinite}
+.clock.over.paused{animation:none}
+@keyframes overpulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.clock.over{animation:none}}
+.clockcard:has(.clock.over){border-color:var(--warn);box-shadow:0 0 0 2px var(--warn) inset}
+.btn.warn{background:var(--warn);color:#231702;border-color:transparent;font-weight:700}
+
+/* Kort for å trekke fra tid klokka gikk for mye. */
+.fixcard{border-color:var(--warn);border-width:2px}
+.fixcard .fhead{font-weight:700;margin-bottom:4px}
+.fixcard .fnote{color:var(--muted);font-size:13px;margin-bottom:10px}
 .clocksub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:12px}
 .bar{height:7px;border-radius:99px;background:var(--line);overflow:hidden;margin-bottom:12px}
 .bar>i{display:block;height:100%;background:var(--brand);border-radius:99px;transition:width .3s linear}
