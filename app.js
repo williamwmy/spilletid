@@ -29,23 +29,58 @@ function balClass(sec, thr) {
 
 /* ============================== STATE ============================== */
 
-function blank() {
+/* Ett lag eier sin egen tropp, sine kamper og sine kampinnstillinger.
+   Spilletidsbalansen løper per lag – trener du to lag, skal de ikke blandes. */
+function blankTeam(name) {
   return {
-    v: 1,
+    id: uid(),
+    name: name || 'Laget mitt',
     squad: [],
     settings: { duration: 50, onField: 7, periods: 2, interval: 5, maxSwaps: 2, threshold: 60 },
     matches: [],
-    currentId: null,
-    tab: 'squad',
-    countdown: false
+    currentId: null
   };
+}
+function blank() {
+  const t = blankTeam();
+  return { v: 2, teams: [t], teamId: t.id, tab: 'squad', countdown: false };
+}
+/* Aktivt lag. Alt annet i appen går gjennom denne. */
+function T() {
+  let t = S.teams.find(x => x.id === S.teamId);
+  if (!t) { t = S.teams[0]; if (t) S.teamId = t.id; }
+  return t;
+}
+
+/* v1 hadde én tropp rett på rota. Gamle data og gamle backup-filer skal
+   fortsatt kunne leses, så de pakkes inn som lagets første lag.          */
+function migrate(p) {
+  if (!p || typeof p !== 'object') return null;
+  if (p.v === 1 && Array.isArray(p.squad)) {
+    const t = blankTeam('Laget mitt');
+    t.squad = p.squad;
+    t.matches = Array.isArray(p.matches) ? p.matches : [];
+    t.currentId = p.currentId || null;
+    if (p.settings) t.settings = Object.assign(t.settings, p.settings);
+    return { v: 2, teams: [t], teamId: t.id, tab: p.tab || 'squad', countdown: !!p.countdown };
+  }
+  if (p.v === 2 && Array.isArray(p.teams) && p.teams.length) {
+    const teams = p.teams.map(t => Object.assign(blankTeam(t && t.name), t || {}));
+    const teamId = teams.some(t => t.id === p.teamId) ? p.teamId : teams[0].id;
+    return { v: 2, teams: teams, teamId: teamId, tab: p.tab || 'squad', countdown: !!p.countdown };
+  }
+  return null;
 }
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      const p = JSON.parse(raw);
-      if (p && p.v === 1 && Array.isArray(p.squad)) return Object.assign(blank(), p);
+      const m = migrate(JSON.parse(raw));
+      if (m) return m;
+      /* Ukjent format. Kan skje hvis appen åpnes med en eldre versjon enn den
+         som lagret. Ta vare på dataene før vi starter blankt – ellers blir de
+         overskrevet ved neste lagring, og da er de borte for godt.          */
+      try { localStorage.setItem(KEY + '-berget', raw); } catch (e) {}
     }
   } catch (e) { console.warn('Kunne ikke lese lagrede data', e); }
   return blank();
@@ -63,8 +98,8 @@ function write() {
   catch (e) { console.warn('Kunne ikke lagre', e); }
 }
 
-const P = id => S.squad.find(p => p.id === id);
-const cur = () => S.matches.find(m => m.id === S.currentId) || null;
+const P = id => T().squad.find(p => p.id === id);
+const cur = () => { const t = T(); return (t && t.matches.find(m => m.id === t.currentId)) || null; };
 const pname = id => { const p = P(id); return p ? p.name : 'Ukjent'; };
 const pnum = id => { const p = P(id); return p && p.number ? p.number : '–'; };
 
@@ -151,8 +186,8 @@ function flush(now) {
    Positiv = har spilt mer enn sin del. Negativ = skal inn.               */
 function balances() {
   const b = {};
-  S.squad.forEach(p => { b[p.id] = { sec: 0, lock: 0, tgt: 0, rot: 0, bal: 0 }; });
-  S.matches.forEach(m => {
+  T().squad.forEach(p => { b[p.id] = { sec: 0, lock: 0, tgt: 0, rot: 0, bal: 0 }; });
+  T().matches.forEach(m => {
     for (const id in m.sec)  if (b[id]) b[id].sec  += m.sec[id];
     for (const id in m.lock) if (b[id]) b[id].lock += m.lock[id];
     for (const id in m.tgt)  if (b[id]) b[id].tgt  += m.tgt[id];
@@ -284,7 +319,7 @@ function endMatch() {
   const m = cur(); if (!m) return;
   flush();
   m.running = false; m.finished = true; releaseWake();
-  S.currentId = null;
+  T().currentId = null;
   save(true); go('stats');
 }
 
@@ -351,6 +386,7 @@ function go(tab) {
   window.scrollTo(0, 0);
 }
 function paintAll() {
+  $$('.teamslot').forEach(el => { el.innerHTML = teamBtnHTML(el.dataset.always); });
   if (S.tab === 'match') renderMatch();
   else if (S.tab === 'stats') renderStats();
   else if (S.tab === 'setup') renderSetup();
@@ -368,7 +404,7 @@ function matchSig(m, pairs) {
     m.onField.join(','), sel,
     Object.keys(m.lineup).map(id => id + (m.lineup[id].share) + (m.lineup[id].locked ? 'L' : '')).join('|'),
     pairs.map(p => (p.out || '-') + '>' + p.in).join('|'),
-    S.countdown, S.squad.length
+    S.countdown, T().squad.length
   ].join('#');
 }
 
@@ -390,8 +426,8 @@ function renderMatch() {
 }
 
 function matchEmptyHTML() {
-  const done = S.matches.filter(x => x.finished).length;
-  return '<header class="topbar"><h1>Kamp</h1></header>' +
+  const done = T().matches.filter(x => x.finished).length;
+  return '<header class="topbar"><h1>Kamp</h1>' + teamBtnHTML() + '</header>' +
     '<div class="card"><div class="empty">Ingen kamp i gang.' +
     (done ? '<br><small>' + done + ' kamp' + (done > 1 ? 'er' : '') + ' ferdigspilt i denne turneringen.</small>' : '') +
     '</div><button class="btn primary big" data-act="tab" data-tab="setup">Sett opp ny kamp</button></div>';
@@ -510,11 +546,14 @@ function matchHTML(m, b, pairs) {
     '</div>';
   };
 
-  const notIn = S.squad.filter(p => !L[p.id]);
+  const notIn = T().squad.filter(p => !L[p.id]);
   const addBtn = notIn.length && !m.finished
     ? '<button class="btn ghost" data-act="addplayer">Legg til spiller i kampen</button>' : '';
 
-  return clock + fixcard + sugg +
+  const tbar = S.teams.length > 1
+    ? '<header class="topbar"><h1>' + esc(T().name) + '</h1>' + teamBtnHTML() + '</header>' : '';
+
+  return tbar + clock + fixcard + sugg +
     '<div class="sect"><h2>På banen (' + m.onField.length + '/' + m.onFieldCount + ')</h2>' +
       (sel ? '<span class="mmeta">Trykk på en annen spiller for å bytte</span>' : '') + '</div>' +
     '<div class="rows">' + (onF.map(id => row(id, 'field')).join('') || '<div class="empty">Ingen på banen</div>') + '</div>' +
@@ -569,6 +608,49 @@ function paintMatch(m, b, pairs) {
 }
 
 /* ------------------------------- SHEETS ------------------------------- */
+
+/* Lagvelger. Har du bare ett lag, skal appen se ut som før – da vises
+   knappen kun i Tropp, som en diskret måte å oppdage funksjonen på.      */
+function teamBtnHTML(always) {
+  const multi = S.teams.length > 1;
+  if (!multi && !always) return '';
+  return '<button class="btn sm teamsel" data-act="teams">' +
+    (multi ? esc(T().name) + ' ▾' : '+ Legg til lag') + '</button>';
+}
+function teamsSheet() {
+  const rows = S.teams.map(t => {
+    const act = t.id === S.teamId;
+    const kamper = t.matches.length;
+    return '<div class="prow tap' + (act ? ' sel' : '') + '" data-act="team-pick" data-id="' + t.id + '">' +
+      '<span class="num2">' + esc((t.name || '?').trim().slice(0, 2).toUpperCase()) + '</span>' +
+      '<span class="who"><b>' + esc(t.name) + '</b><small>' +
+        t.squad.length + ' spiller' + (t.squad.length === 1 ? '' : 'e') + ' · ' +
+        kamper + ' kamp' + (kamper === 1 ? '' : 'er') + (act ? ' · aktivt nå' : '') +
+      '</small></span>' +
+      '<button class="dots" data-act="team-rename" data-id="' + t.id + '">✎</button>' +
+    '</div>';
+  }).join('');
+  openSheet(
+    '<h2>Lag</h2>' +
+    '<div class="rows">' + rows + '</div>' +
+    '<p class="hint">Hvert lag har egen tropp, egne kamper og egen spilletidsbalanse. ' +
+      'Ingenting blandes mellom lag.</p>' +
+    '<div class="rowbtns"><button class="btn primary" data-act="team-new">Nytt lag</button>' +
+      (S.teams.length > 1
+        ? '<button class="btn danger" data-act="team-del" data-id="' + S.teamId + '">Slett ' + esc(T().name) + '</button>'
+        : '') +
+    '</div>' +
+    '<div class="spacer"></div><button class="btn big" data-close>Lukk</button>'
+  );
+}
+/* Bytter aktivt lag. Kamp som går blir pauset – den hører til det andre laget. */
+function switchTeam(id) {
+  const m = cur();
+  if (m && m.running) { flush(); m.running = false; releaseWake(); }
+  S.teamId = id; sel = null; setup = null; lastSig = '';
+  save(true); closeSheet();
+  go(cur() ? 'match' : (T().squad.length ? 'setup' : 'squad'));
+}
 
 function openSheet(html) { $('#sheet-body').innerHTML = html; $('#sheet').hidden = false; }
 function closeSheet() { $('#sheet').hidden = true; $('#sheet-body').innerHTML = ''; }
@@ -639,7 +721,7 @@ function matchMenuSheet() {
 
 function addPlayerSheet() {
   const m = cur(); if (!m) return;
-  const notIn = S.squad.filter(p => !m.lineup[p.id]);
+  const notIn = T().squad.filter(p => !m.lineup[p.id]);
   openSheet('<h2>Legg til i kampen</h2><div class="rows">' +
     (notIn.length ? notIn.map(p =>
       '<div class="srow"><span class="num2" style="width:34px;height:34px;border-radius:10px;background:var(--line);display:flex;align-items:center;justify-content:center;font-weight:800">' +
@@ -668,10 +750,10 @@ function squadSheet(id) {
 /* ------------------------------- TROPP ------------------------------- */
 
 function renderSquad() {
-  $('#q-count').textContent = S.squad.length;
+  $('#q-count').textContent = T().squad.length;
   const b = balances();
-  $('#squad-list').innerHTML = S.squad.length
-    ? S.squad.map(p =>
+  $('#squad-list').innerHTML = T().squad.length
+    ? T().squad.map(p =>
       '<div class="prow tap" data-act="sq-menu" data-id="' + p.id + '">' +
       '<span class="num2">' + esc(p.number || '–') + '</span>' +
       '<span class="who"><b>' + esc(p.name) + '</b><small>' + fmt(b[p.id] ? b[p.id].sec : 0) + ' spilt i turneringen</small></span>' +
@@ -691,7 +773,7 @@ function addPlayers(text, numHint) {
     if (!num && i === 0 && numHint) num = numHint;
     name = name.trim();
     if (!name) return;
-    S.squad.push({ id: uid(), name, number: num });
+    T().squad.push({ id: uid(), name, number: num });
     n++;
   });
   return n;
@@ -701,7 +783,7 @@ function addPlayers(text, numHint) {
 
 let setup = null;
 function setupInit() {
-  const st = S.settings;
+  const st = T().settings;
   const b = balances();
   setup = {
     name: '',
@@ -709,7 +791,7 @@ function setupInit() {
     interval: st.interval, maxSwaps: st.maxSwaps, threshold: st.threshold,
     lineup: {}, start: []
   };
-  S.squad.forEach(p => { setup.lineup[p.id] = { share: 1, locked: false }; });
+  T().squad.forEach(p => { setup.lineup[p.id] = { share: 1, locked: false }; });
   autoStart();
 }
 function autoStart() {
@@ -728,7 +810,7 @@ function renderSetup() {
       '<p class="hint">Avslutt den pågående kampen før du starter en ny.</p>' +
       '<div class="rowbtns"><button class="btn" data-act="tab" data-tab="match">Gå til kampen</button></div></div>'
     : '';
-  if (!setup.name) $('#s-name').placeholder = 'Kamp ' + (S.matches.length + 1);
+  if (!setup.name) $('#s-name').placeholder = 'Kamp ' + (T().matches.length + 1);
   $('#s-duration').value = setup.duration;
   $('#s-onfield').value = setup.onField;
   $('#s-periods').value = setup.periods;
@@ -737,7 +819,7 @@ function renderSetup() {
   $('#s-threshold').value = setup.threshold;
 
   const b = balances();
-  $('#setup-players').innerHTML = S.squad.length ? S.squad.map(p => {
+  $('#setup-players').innerHTML = T().squad.length ? T().squad.map(p => {
     const l = setup.lineup[p.id] || { share: 1, locked: false };
     return '<div class="srow"><span class="num2" style="flex:none;width:34px;height:34px;border-radius:10px;background:var(--line);display:flex;align-items:center;justify-content:center;font-weight:800">' +
       esc(p.number || '–') + '</span>' +
@@ -752,7 +834,7 @@ function renderSetup() {
         (l.locked ? '🔒' : '🔓') + '</button></div>';
   }).join('') : '<div class="empty">Legg inn troppen først.</div>';
 
-  $('#setup-start').innerHTML = S.squad.map(p => {
+  $('#setup-start').innerHTML = T().squad.map(p => {
     const l = setup.lineup[p.id] || { share: 0 };
     const on = setup.start.includes(p.id);
     return '<button class="chip' + (on ? ' on' : '') + (l.share <= 0 ? ' dis' : '') +
@@ -784,20 +866,20 @@ function startMatch() {
   Object.keys(setup.lineup).forEach(id => {
     if (setup.lineup[id].share <= 0) setup.start = setup.start.filter(x => x !== id);
   });
-  S.settings = {
+  T().settings = {
     duration: setup.duration, onField: setup.onField, periods: setup.periods,
     interval: setup.interval, maxSwaps: setup.maxSwaps, threshold: setup.threshold
   };
   const lineup = {};
   Object.keys(setup.lineup).forEach(id => { lineup[id] = { share: setup.lineup[id].share, locked: setup.lineup[id].locked }; });
   const m = newMatch({
-    name: setup.name || ('Kamp ' + (S.matches.length + 1)),
+    name: setup.name || ('Kamp ' + (T().matches.length + 1)),
     duration: setup.duration, onField: setup.onField, periods: setup.periods,
     interval: setup.interval, maxSwaps: setup.maxSwaps, threshold: setup.threshold,
     lineup, onField0: setup.start
   });
-  S.matches.push(m);
-  S.currentId = m.id;
+  T().matches.push(m);
+  T().currentId = m.id;
   setup = null;
   save(true);
   go('match');
@@ -807,15 +889,15 @@ function startMatch() {
 
 function renderStats() {
   const b = balances();
-  const ms = S.matches;
+  const ms = T().matches;
   const anyLock = Object.keys(b).some(id => b[id].lock > 0.5);
-  const thr = S.settings.threshold;
+  const thr = T().settings.threshold;
 
   let html = '';
-  if (!S.squad.length) {
+  if (!T().squad.length) {
     html = '<div class="card"><div class="empty">Ingen spillere enno.</div></div>';
   } else {
-    const rows = S.squad.slice().sort((x, y) => b[x.id].bal - b[y.id].bal).map(p => {
+    const rows = T().squad.slice().sort((x, y) => b[x.id].bal - b[y.id].bal).map(p => {
       const o = b[p.id];
       return '<tr><td>' + (p.number ? '<b>' + esc(p.number) + '</b> ' : '') + esc(p.name) + '</td>' +
         '<td class="mono">' + fmt(o.sec) + '</td>' +
@@ -835,7 +917,7 @@ function renderStats() {
 
   html += '<div class="card"><h2>Kamper (' + ms.length + ')</h2><div class="rows">' +
     (ms.length ? ms.map((m, i) => {
-      const on = m.id === S.currentId;
+      const on = m.id === T().currentId;
       return '<div class="prow"><span class="num2">' + (i + 1) + '</span>' +
         '<span class="who"><b>' + esc(m.name) + '</b><small>' + fmt(m.elapsed) + ' av ' +
         Math.round(m.durationSec / 60) + ' min' + (on ? ' · i gang' : m.finished ? ' · ferdig' : ' · ikke avsluttet') + '</small></span>' +
@@ -844,9 +926,16 @@ function renderStats() {
         '<button class="dots" data-act="del-match" data-id="' + m.id + '">✕</button></div>';
     }).join('') : '<div class="empty">Ingen kamper registrert.</div>') + '</div></div>';
 
+  let berget = '';
+  try { berget = localStorage.getItem(KEY + '-berget') || ''; } catch (e) {}
+
   html += '<div class="card"><h2>Data</h2><div class="rowbtns">' +
     '<button class="btn" data-act="export">Ta backup</button>' +
     '<button class="btn" data-act="import">Les inn backup</button></div>' +
+    (berget ? '<div class="rowbtns"><button class="btn" data-act="rescue">' +
+      'Gjenopprett berget data</button></div>' +
+      '<p class="hint">Appen fant lagrede data den ikke kjente formatet på, og tok ' +
+      'vare på dem i stedet for å overskrive.</p>' : '') +
     '<div class="rowbtns"><button class="btn danger" data-act="new-cup">Ny turnering</button>' +
     '<button class="btn danger" data-act="wipe">Slett alt</button></div>' +
     '<p class="hint">«Ny turnering» nullstiller spilletida, men beheld troppen.</p></div>';
@@ -872,10 +961,12 @@ function importData() {
     const r = new FileReader();
     r.onload = () => {
       try {
-        const p = JSON.parse(r.result);
-        if (!p || p.v !== 1 || !Array.isArray(p.squad)) throw new Error('feil format');
-        if (!confirm('Erstatte alle data med backupen?')) return;
-        S = Object.assign(blank(), p); save(true); go('stats');
+        const p = migrate(JSON.parse(r.result));
+        if (!p) throw new Error('feil format');
+        const n = p.teams.length;
+        if (!confirm('Erstatte alle data med backupen? Den inneholder ' +
+          n + (n > 1 ? ' lag.' : ' lag.'))) return;
+        S = p; save(true); go('stats');
       } catch (e) { alert('Kunne ikke lese filen: ' + e.message); }
     };
     r.readAsText(f);
@@ -986,8 +1077,8 @@ document.addEventListener('click', ev => {
     case 'mm-delete': {
       if (!m) break;
       if (confirm('Slette kampen og all spilletid i han?')) {
-        S.matches = S.matches.filter(x => x.id !== m.id);
-        S.currentId = null; save(true); closeSheet(); go('stats');
+        T().matches = T().matches.filter(x => x.id !== m.id);
+        T().currentId = null; save(true); closeSheet(); go('stats');
       }
       break;
     }
@@ -1027,7 +1118,7 @@ document.addEventListener('click', ev => {
     case 'sq-del': {
       const p = P(id); if (!p) break;
       if (!confirm('Slette ' + p.name + ' fra troppen? Spilletid i ferdige kamper blir liggende.')) break;
-      S.squad = S.squad.filter(x => x.id !== id);
+      T().squad = T().squad.filter(x => x.id !== id);
       const mm = cur();
       if (mm) { delete mm.lineup[id]; mm.onField = mm.onField.filter(x => x !== id); }
       if (setup) { delete setup.lineup[id]; setup.start = setup.start.filter(x => x !== id); }
@@ -1037,25 +1128,65 @@ document.addEventListener('click', ev => {
     /* --- statistikk --- */
     case 'reopen': {
       if (cur()) { alert('Avslutt den pågående kampen først.'); break; }
-      const mm = S.matches.find(x => x.id === id); if (!mm) break;
+      const mm = T().matches.find(x => x.id === id); if (!mm) break;
       mm.finished = false; mm.running = false; mm.lastTick = Date.now();
-      S.currentId = id; save(true); go('match'); break;
+      T().currentId = id; save(true); go('match'); break;
     }
     case 'del-match': {
-      const mm = S.matches.find(x => x.id === id); if (!mm) break;
+      const mm = T().matches.find(x => x.id === id); if (!mm) break;
       if (!confirm('Slette «' + mm.name + '»?')) break;
-      S.matches = S.matches.filter(x => x.id !== id);
-      if (S.currentId === id) S.currentId = null;
+      T().matches = T().matches.filter(x => x.id !== id);
+      if (T().currentId === id) T().currentId = null;
       save(true); paintAll(); break;
+    }
+    /* --- lag --- */
+    case 'teams': teamsSheet(); break;
+    case 'team-pick': if (id !== S.teamId) switchTeam(id); else closeSheet(); break;
+    case 'team-new': {
+      const n = prompt('Navn på laget');
+      if (!n || !n.trim()) break;
+      const t2 = blankTeam(n.trim());
+      S.teams.push(t2);
+      switchTeam(t2.id);
+      break;
+    }
+    case 'team-rename': {
+      const t2 = S.teams.find(x => x.id === id); if (!t2) break;
+      const n = prompt('Navn på laget', t2.name);
+      if (n && n.trim()) { t2.name = n.trim(); save(true); teamsSheet(); paintAll(); }
+      break;
+    }
+    case 'team-del': {
+      if (S.teams.length < 2) break;
+      const t2 = S.teams.find(x => x.id === id); if (!t2) break;
+      if (!confirm('Slette laget ' + t2.name + ' med ' + t2.squad.length + ' spillere og ' +
+        t2.matches.length + ' kamper? Dette kan ikke angres.')) break;
+      S.teams = S.teams.filter(x => x.id !== id);
+      if (S.teamId === id) { S.teamId = S.teams[0].id; sel = null; setup = null; }
+      lastSig = ''; save(true); closeSheet(); paintAll();
+      break;
+    }
+
+    case 'rescue': {
+      let raw = '';
+      try { raw = localStorage.getItem(KEY + '-berget') || ''; } catch (e) {}
+      if (!raw) break;
+      let p = null;
+      try { p = migrate(JSON.parse(raw)); } catch (e) {}
+      if (!p) { alert('Klarte ikke å lese de bergede dataene.'); break; }
+      if (!confirm('Erstatte alt med de bergede dataene?')) break;
+      S = p; save(true);
+      try { localStorage.removeItem(KEY + '-berget'); } catch (e) {}
+      go('stats'); break;
     }
     case 'export': exportData(); break;
     case 'import': importData(); break;
     case 'new-cup': {
-      if (!confirm('Nullstille all spilletid og starte ny turnering? Troppen blir beholdt.')) break;
-      S.matches = []; S.currentId = null; save(true); paintAll(); break;
+      if (!confirm('Nullstille all spilletid for ' + T().name + ' og starte ny turnering? Troppen blir beholdt.')) break;
+      T().matches = []; T().currentId = null; save(true); paintAll(); break;
     }
     case 'wipe': {
-      if (!confirm('Slette ALLE data, også troppen?')) break;
+      if (!confirm('Slette ALLE data for alle lag, også troppene?')) break;
       S = blank(); save(true); go('squad'); break;
     }
   }
@@ -1109,7 +1240,7 @@ function addFromInputs() {
   const n = addPlayers(nm, num);
   if (n) {
     $('#q-name').value = ''; $('#q-number').value = '';
-    if (setup) S.squad.forEach(p => { if (!setup.lineup[p.id]) setup.lineup[p.id] = { share: 1, locked: false }; });
+    if (setup) T().squad.forEach(p => { if (!setup.lineup[p.id]) setup.lineup[p.id] = { share: 1, locked: false }; });
     save(true); renderSquad(); $('#q-name').focus();
   }
 }
@@ -1137,7 +1268,7 @@ function banner(msg) {
     }
     if (m.running) requestWake();
   }
-  go(m ? 'match' : (S.squad.length ? 'setup' : 'squad'));
+  go(m ? 'match' : (T().squad.length ? 'setup' : 'squad'));
 
   setInterval(() => {
     const mm = cur();

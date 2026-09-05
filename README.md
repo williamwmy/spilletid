@@ -19,6 +19,19 @@ Ingen backend, ingen database – alt ligger i nettleseren (`localStorage`).
    trykker **Bekreft bytte** – da starter klokka til de som kommer inn.
 4. **Statistikk** – spilletid per spiller for hele turneringen, kamp for kamp.
 
+## Flere lag
+
+Trener du to lag, holder appen dem helt adskilt: egen tropp, egne kamper, egne
+kampinnstillinger og egen spilletidsbalanse. Ingenting blandes.
+
+Lagvelgeren ligger øverst i **Tropp**. Har du bare ett lag, står det bare
+«＋ Legg til lag» der, og resten av appen ser ut som før. Fra og med lag nummer
+to vises navnet på det aktive laget øverst i Kamp, Ny kamp og Statistikk, så du
+ikke fører spilletid på feil lag.
+
+Bytter du lag mens klokka går, blir kampen satt på pause – den hører til det
+andre laget.
+
 ## Omganger og tilleggstid
 
 Kamplengden deles i like mange deler som du velger omganger (1–10). Klokka
@@ -82,7 +95,11 @@ Netlify, Cloudflare Pages. Åpne siden på telefonen og velg
 
 - Data ligger bare i denne nettleseren på denne telefonen. Ta **backup** fra
   Statistikk-skjermen før du sletter nettleserdata eller bytter telefon.
-- **Ny turnering** nullstiller spilletiden, men beholder troppen.
+  Backupen inneholder alle lag.
+- Møter appen lagrede data den ikke kjenner formatet på, overskriver den dem
+  ikke – den tar vare på dem, og tilbyr **Gjenopprett berget data** i
+  Statistikk.
+- **Ny turnering** nullstiller spilletiden for det aktive laget, men beholder troppen.
 - Lukker du appen mens klokka går, settes klokka på pause ved neste oppstart, og
   du får varsel om å sjekke tiden. Juster med **⋯** → *Rett opp klokka*.
 - Navn og nummer kan endres når som helst: trykk på spilleren i **Tropp**.

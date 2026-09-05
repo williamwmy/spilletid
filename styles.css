@@ -27,7 +27,10 @@ body{
 h1{font-size:22px;margin:0}
 h2{font-size:15px;margin:0 0 10px;letter-spacing:.02em;text-transform:uppercase;color:var(--muted)}
 main{max-width:720px;margin:0 auto;padding:10px 12px 0}
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:8px 2px 12px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 2px 12px}
+.topbar h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.teamslot{flex:none}
+.teamsel{flex:none;max-width:min(58vw,260px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px;box-shadow:var(--shadow)}
 .hint{color:var(--muted);font-size:13px;margin:8px 0 0}
 .spacer{height:24px}
