@@ -90,6 +90,7 @@ Netlify, Cloudflare Pages. Åpne siden på telefonen og velg
 | `sw.js` | service worker (offline-cache) |
 | `manifest.webmanifest` | app-navn, farger, ikoner |
 | `icons/` | app-ikoner (192, 512, maskable) |
+| `icons/logo.svg` | kilden til ikonene – stoppeklokke med fotball som urskive |
 
 ## Godt å vite
 
