@@ -4,6 +4,10 @@
    Ingen backend, ingen database. Alt lagres i localStorage.
    ========================================================================= */
 
+/* Versjonen vises nederst på Statistikk-fanen, så du ser hva du faktisk
+   kjører etter en oppdatering. Bump denne OG CACHE i sw.js sammen.      */
+const APP_VERSION = '1.1.0';
+
 /* Nøkkelen beholdes fra da appen het fotball-manager. Bytter vi den,
    forsvinner alle lagrede data for de som allerede bruker appen.        */
 const KEY = 'fm.v1';
@@ -1025,6 +1029,8 @@ function renderStats() {
     '<div class="rowbtns"><button class="btn danger" data-act="new-cup">Ny turnering</button>' +
     '<button class="btn danger" data-act="wipe">Slett alt</button></div>' +
     '<p class="hint">«Ny turnering» nullstiller spilletida, men beholder troppen.</p></div>';
+
+  html += '<div class="version">Spilletid v' + esc(APP_VERSION) + '</div>';
 
   $('#stats-body').innerHTML = html;
 }
