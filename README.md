@@ -69,7 +69,7 @@ melde skade, låse, ta av banen eller rette opp spilletiden manuelt.
 En PWA må serveres over http (ikke `file://`) for at offline-modus skal virke:
 
 ```bash
-cd fotball-manager
+cd spilletid
 python3 -m http.server 8000
 # åpne http://localhost:8000
 ```

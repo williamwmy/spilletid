@@ -4,6 +4,8 @@
    Ingen backend, ingen database. Alt lagres i localStorage.
    ========================================================================= */
 
+/* Nøkkelen beholdes fra da appen het fotball-manager. Bytter vi den,
+   forsvinner alle lagrede data for de som allerede bruker appen.        */
 const KEY = 'fm.v1';
 const $  = (s, e = document) => e.querySelector(s);
 const $$ = (s, e = document) => Array.from(e.querySelectorAll(s));
@@ -54,18 +56,49 @@ function T() {
 
 /* v1 hadde én tropp rett på rota. Gamle data og gamle backup-filer skal
    fortsatt kunne leses, så de pakkes inn som lagets første lag.          */
+/* Fyller inn det som mangler i et lag lest fra lagring eller backup, så
+   resten av appen kan stole på at feltene finnes og har riktig type.     */
+function normTeam(raw) {
+  const t = blankTeam(raw && raw.name);
+  if (!raw || typeof raw !== 'object') return t;
+  if (typeof raw.id === 'string' && raw.id) t.id = raw.id;
+  t.squad = (Array.isArray(raw.squad) ? raw.squad : [])
+    .filter(p => p && typeof p === 'object' && p.id)
+    .map(p => ({ id: String(p.id), name: String(p.name || 'Ukjent'), number: String(p.number || '') }));
+  if (raw.settings && typeof raw.settings === 'object') Object.assign(t.settings, raw.settings);
+  t.matches = (Array.isArray(raw.matches) ? raw.matches : [])
+    .filter(m => m && typeof m === 'object' && m.id)
+    .map(m => {
+      const obj = x => (x && typeof x === 'object' && !Array.isArray(x)) ? x : {};
+      m.lineup = obj(m.lineup); m.sec = obj(m.sec); m.lock = obj(m.lock); m.tgt = obj(m.tgt);
+      m.onField = Array.isArray(m.onField) ? m.onField : [];
+      m.log = Array.isArray(m.log) ? m.log : [];
+      m.periods = clamp(parseInt(m.periods, 10) || 1, 1, 10);
+      m.period = clamp(parseInt(m.period, 10) || 1, 1, m.periods);
+      m.durationSec = Math.max(60, Number(m.durationSec) || 60);
+      m.onFieldCount = clamp(parseInt(m.onFieldCount, 10) || 7, 1, 11);
+      m.interval = clamp(parseInt(m.interval, 10) || 5, 1, 30);
+      m.maxSwaps = clamp(parseInt(m.maxSwaps, 10) || 1, 1, 11);
+      m.threshold = clamp(Number(m.threshold) || 0, 0, 600);
+      m.elapsed = Math.max(0, Number(m.elapsed) || 0);
+      m.lastSub = clamp(Number(m.lastSub) || 0, 0, m.elapsed);
+      m.overChime = Number(m.overChime) || 0;
+      m.lastTick = Number(m.lastTick) || Date.now();
+      m.running = !!m.running; m.finished = !!m.finished; m.nudged = !!m.nudged;
+      return m;
+    });
+  t.currentId = t.matches.some(m => m.id === raw.currentId) ? raw.currentId : null;
+  return t;
+}
 function migrate(p) {
   if (!p || typeof p !== 'object') return null;
   if (p.v === 1 && Array.isArray(p.squad)) {
-    const t = blankTeam('Laget mitt');
-    t.squad = p.squad;
-    t.matches = Array.isArray(p.matches) ? p.matches : [];
-    t.currentId = p.currentId || null;
-    if (p.settings) t.settings = Object.assign(t.settings, p.settings);
+    const t = normTeam({ name: 'Laget mitt', squad: p.squad, matches: p.matches,
+                         currentId: p.currentId, settings: p.settings });
     return { v: 2, teams: [t], teamId: t.id, tab: p.tab || 'squad', countdown: !!p.countdown };
   }
   if (p.v === 2 && Array.isArray(p.teams) && p.teams.length) {
-    const teams = p.teams.map(t => Object.assign(blankTeam(t && t.name), t || {}));
+    const teams = p.teams.map(normTeam);
     const teamId = teams.some(t => t.id === p.teamId) ? p.teamId : teams[0].id;
     return { v: 2, teams: teams, teamId: teamId, tab: p.tab || 'squad', countdown: !!p.countdown };
   }
@@ -122,7 +155,7 @@ function inBreak(m) {
   return !m.running && !m.finished && m.period < m.periods && m.elapsed >= periodEnd(m);
 }
 function accrue(m, dt) {
-  if (dt <= 0) return;
+  if (!(dt > 0)) return;
   m.elapsed += dt;
   const L = m.lineup;
   let slots = 0;
@@ -141,7 +174,7 @@ function accrue(m, dt) {
    må den tida trekkes fra igjen for dem som stod på banen - ellers får de
    betalt for tid det ikke ble spilt.                                       */
 function rollback(m, dt) {
-  if (dt <= 0) return;
+  if (!(dt > 0)) return;
   dt = Math.min(dt, m.elapsed);
   m.elapsed -= dt;
   const L = m.lineup;
@@ -159,7 +192,14 @@ function rollback(m, dt) {
     });
   }
   m.lastSub = Math.min(m.lastSub, m.elapsed);
-  m.overChime = overrun(m) > 0 ? 1 + Math.floor(overrun(m) / 60) : 0;
+  syncChime(m);
+}
+/* Etter at klokka eller kamplengden er rettet manuelt: still varslene så de
+   svarer til der klokka står nå, ellers kommer neste varsel aldri (eller
+   straks, for tid som alt er varslet).                                     */
+function syncChime(m) {
+  const o = overrun(m);
+  m.overChime = o > 0 ? 1 + Math.floor(o / 60) : 0;
 }
 
 function flush(now) {
@@ -167,9 +207,9 @@ function flush(now) {
   const m = cur();
   if (!m) return;
   if (!m.running) { m.lastTick = now; return; }
-  let dt = (now - m.lastTick) / 1000;
+  const dt = (now - (m.lastTick || now)) / 1000;
   m.lastTick = now;
-  if (dt <= 0) return;
+  if (!(dt > 0)) return;
   accrue(m, dt);
   /* Ett tydelig signal når omgangen er ute, og ett nytt hvert minutt så
      lenge klokka får gå videre. En stoppet klokke blir ikke lagt merke til. */
@@ -279,16 +319,18 @@ function nextPeriod() {
 function doSwap(outId, inId) {
   const m = cur(); if (!m) return;
   flush();
+  const bad = () => { sel = null; lastSig = ''; paintAll(); };
   if (outId && inId) {
     const i = m.onField.indexOf(outId);
-    if (i < 0 || m.onField.includes(inId)) return;
+    if (i < 0 || m.onField.includes(inId)) return bad();
     m.onField[i] = inId;
   } else if (inId) {
-    if (m.onField.includes(inId)) return;
+    if (m.onField.includes(inId)) return bad();
     m.onField.push(inId);
   } else if (outId) {
+    if (!m.onField.includes(outId)) return bad();
     m.onField = m.onField.filter(x => x !== outId);
-  }
+  } else return;
   m.log.push({ t: Math.round(m.elapsed), out: outId, in: inId });
   m.lastSub = m.elapsed; m.nudged = false;
   sel = null;
@@ -298,13 +340,14 @@ function applyPairs(pairs) {
   const m = cur(); if (!m) return;
   flush();
   pairs.forEach(p => {
+    let done = false;
     if (p.out && p.in) {
       const i = m.onField.indexOf(p.out);
-      if (i >= 0 && !m.onField.includes(p.in)) m.onField[i] = p.in;
+      if (i >= 0 && !m.onField.includes(p.in)) { m.onField[i] = p.in; done = true; }
     } else if (p.in && !m.onField.includes(p.in)) {
-      m.onField.push(p.in);
+      m.onField.push(p.in); done = true;
     }
-    m.log.push({ t: Math.round(m.elapsed), out: p.out, in: p.in });
+    if (done) m.log.push({ t: Math.round(m.elapsed), out: p.out, in: p.in });
   });
   m.lastSub = m.elapsed; m.nudged = false;
   sel = null;
@@ -323,7 +366,7 @@ function endMatch() {
   save(true); go('stats');
 }
 
-/* ============================== HJELPARAR ============================== */
+/* ============================== HJELPERE ============================== */
 
 /* Lyd. AudioContext må åpnes av et brukertrykk, så den vekkes i toggleRun()
    og nextPeriod(). Vibrasjon i tillegg, for telefoner på lydløs.           */
@@ -365,7 +408,12 @@ function chimeNag() {
 let wake = null;
 async function requestWake() {
   try {
-    if ('wakeLock' in navigator && !wake) wake = await navigator.wakeLock.request('screen');
+    if (!('wakeLock' in navigator) || wake) return;
+    const w = await navigator.wakeLock.request('screen');
+    /* Slippes automatisk når siden går i bakgrunnen. Nullstill, så neste
+       requestWake() faktisk ber om en ny.                                */
+    w.addEventListener('release', () => { if (wake === w) wake = null; });
+    wake = w;
   } catch (e) {}
 }
 function releaseWake() { try { if (wake) { wake.release(); wake = null; } } catch (e) {} }
@@ -374,6 +422,9 @@ function releaseWake() { try { if (wake) { wake.release(); wake = null; } } catc
 
 let sel = null;          // valgt spiller for manuelt bytte
 let lastSig = '';
+/* Når dataene byttes ut under føttene på visningen (import, bytte av lag,
+   sletting), må alt som husker spiller-id-er fra før glemmes.            */
+function resetView() { sel = null; setup = null; lastSig = ''; }
 
 function go(tab) {
   S.tab = tab; sel = null; lastSig = ''; save();
@@ -400,7 +451,7 @@ function matchSig(m, pairs) {
   return [
     m.id, m.running, m.period, m.finished, m.onFieldCount, m.durationSec,
     inBreak(m), (overrun(m) > 0 ? 'o' : ''),
-    m.elapsed >= m.durationSec - 0.5,
+    m.elapsed >= m.durationSec - 0.5, m.nudged,
     m.onField.join(','), sel,
     Object.keys(m.lineup).map(id => id + (m.lineup[id].share) + (m.lineup[id].locked ? 'L' : '')).join('|'),
     pairs.map(p => (p.out || '-') + '>' + p.in).join('|'),
@@ -464,7 +515,7 @@ function matchHTML(m, b, pairs) {
       '<div class="clocksub" id="clocksub"></div>' +
       '<div class="bar"><i id="pbar"></i></div>' +
       '<div class="ctrls">' + ctrls +
-        '<button class="btn ghost" data-act="menu" style="flex:0 0 56px">⋯</button>' +
+        '<button class="btn ghost" data-act="menu" style="flex:0 0 56px" aria-label="Kampmeny">⋯</button>' +
       '</div>' +
     '</div>';
 
@@ -542,7 +593,7 @@ function matchHTML(m, b, pairs) {
       '<span class="who"><b>' + esc(pname(id)) + '</b><small>' + (tags.join(' · ') || (where === 'field' ? 'på banen' : 'på benken')) + '</small></span>' +
       '<span class="tm"><b class="mono" data-pt="' + id + '">0:00</b>' +
         '<small class="mono" data-pb="' + id + '"></small></span>' +
-      '<button class="dots" data-act="pmenu" data-id="' + id + '">⋯</button>' +
+      '<button class="dots" data-act="pmenu" data-id="' + id + '" aria-label="Mer om ' + esc(pname(id)) + '">⋯</button>' +
     '</div>';
   };
 
@@ -627,7 +678,7 @@ function teamsSheet() {
         t.squad.length + ' spiller' + (t.squad.length === 1 ? '' : 'e') + ' · ' +
         kamper + ' kamp' + (kamper === 1 ? '' : 'er') + (act ? ' · aktivt nå' : '') +
       '</small></span>' +
-      '<button class="dots" data-act="team-rename" data-id="' + t.id + '">✎</button>' +
+      '<button class="dots" data-act="team-rename" data-id="' + t.id + '" aria-label="Endre navn på ' + esc(t.name) + '">✎</button>' +
     '</div>';
   }).join('');
   openSheet(
@@ -647,9 +698,30 @@ function teamsSheet() {
 function switchTeam(id) {
   const m = cur();
   if (m && m.running) { flush(); m.running = false; releaseWake(); }
-  S.teamId = id; sel = null; setup = null; lastSig = '';
+  S.teamId = id; resetView();
   save(true); closeSheet();
   go(cur() ? 'match' : (T().squad.length ? 'setup' : 'squad'));
+}
+
+/* Blink et tall som nettopp endra seg. Uten dette ser et trykk på «+30 s» ut
+   som ingenting – tallet står et annet sted på skjermen enn knappen.        */
+function flashEl(el) {
+  if (!el) return;
+  el.classList.remove('flash');
+  void el.offsetWidth;            // tving reflow, ellers starter ikke animasjonen på nytt
+  el.classList.add('flash');
+}
+
+/* Oppdaterer tallene i spiller-arket der de står, i stedet for å bygge hele
+   arket på nytt: innerHTML nullstiller rullingen, og da hopper arket til
+   toppen for hvert eneste trykk – bort fra knappene du holder på med.      */
+function paintPlayerSheet(id, note, warn) {
+  const m = cur(); if (!m) return;
+  const b = balances();
+  $$('[data-ph-sec="' + id + '"]').forEach(e => { e.textContent = fmt(m.sec[id] || 0); flashEl(e); });
+  $$('[data-ph-bal="' + id + '"]').forEach(e => { e.textContent = fmtSign(b[id] ? b[id].bal : 0); });
+  const n = $('[data-ph-note="' + id + '"]');
+  if (n) { n.textContent = note || ''; n.className = 'adjnote' + (warn ? ' warn' : ''); }
 }
 
 function openSheet(html) { $('#sheet-body').innerHTML = html; $('#sheet').hidden = false; }
@@ -662,8 +734,10 @@ function playerSheet(id) {
   const shares = [1, 0.75, 0.5, 0.25, 0];
   openSheet(
     '<div class="shead"><span class="num2">' + esc(pnum(id)) + '</span>' +
-      '<div><b>' + esc(pname(id)) + '</b><small>' + fmt(m.sec[id] || 0) + ' i denne kampen · ' +
-      (L.locked ? 'låst' : 'saldo ' + fmtSign(balances()[id] ? balances()[id].bal : 0)) + '</small></div></div>' +
+      '<div><b>' + esc(pname(id)) + '</b><small>' +
+      '<span data-ph-sec="' + id + '">' + fmt(m.sec[id] || 0) + '</span> i denne kampen · ' +
+      (L.locked ? 'låst' : 'saldo <span data-ph-bal="' + id + '">' +
+        fmtSign(balances()[id] ? balances()[id].bal : 0) + '</span>') + '</small></div></div>' +
     '<div class="sgroup"><span>På banen</span><div class="rowbtns">' +
       (onF
         ? '<button class="btn" data-act="ph-off" data-id="' + id + '">Ta av banen</button>'
@@ -678,7 +752,13 @@ function playerSheet(id) {
       '<button class="btn" data-act="ph-lock" data-id="' + id + '">' +
         (L.locked ? '🔓 Ta med i rotasjonen' : '🔒 Lås (f.eks. keeper)') + '</button>' +
     '</div><p class="hint">Låst spiller blir aldri foreslått byttet, og tida deres teller ikke i fordelingen.</p></div>' +
-    '<div class="sgroup"><span>Rett opp spilletid</span><div class="rowbtns">' +
+    '<div class="sgroup"><span>Rett opp spilletid</span>' +
+      '<div class="adjval"><b class="mono" data-ph-sec="' + id + '">' + fmt(m.sec[id] || 0) + '</b>' +
+        '<small>spilt i denne kampen' +
+        (L.locked ? '' : ' · saldo <span data-ph-bal="' + id + '">' +
+          fmtSign(balances()[id] ? balances()[id].bal : 0) + '</span>') + '</small></div>' +
+      '<div class="adjnote" data-ph-note="' + id + '"></div>' +
+      '<div class="rowbtns">' +
       '<button class="btn" data-act="ph-adj" data-id="' + id + '" data-d="-60">−1 min</button>' +
       '<button class="btn" data-act="ph-adj" data-id="' + id + '" data-d="-30">−30 s</button>' +
       '<button class="btn" data-act="ph-adj" data-id="' + id + '" data-d="30">+30 s</button>' +
@@ -698,7 +778,10 @@ function matchMenuSheet() {
       '<button class="btn" data-act="mm-dur" data-d="-60">−1 min</button>' +
       '<button class="btn" data-act="mm-dur" data-d="60">+1 min</button>' +
     '</div></div>' +
-    '<div class="sgroup"><span>Rett opp klokka</span><div class="rowbtns">' +
+    '<div class="sgroup"><span>Rett opp klokka</span>' +
+      '<div class="adjval"><b class="mono" data-mm-clock="1">' + fmt(m.elapsed) + '</b>' +
+        '<small>på klokka</small></div>' +
+      '<div class="rowbtns">' +
       '<button class="btn" data-act="mm-clock" data-d="-60">−1 min</button>' +
       '<button class="btn" data-act="mm-clock" data-d="-30">−30 s</button>' +
       '<button class="btn" data-act="mm-clock" data-d="30">+30 s</button>' +
@@ -724,7 +807,7 @@ function addPlayerSheet() {
   const notIn = T().squad.filter(p => !m.lineup[p.id]);
   openSheet('<h2>Legg til i kampen</h2><div class="rows">' +
     (notIn.length ? notIn.map(p =>
-      '<div class="srow"><span class="num2" style="width:34px;height:34px;border-radius:10px;background:var(--line);display:flex;align-items:center;justify-content:center;font-weight:800">' +
+      '<div class="srow"><span class="num2">' +
       esc(p.number || '–') + '</span><span class="who"><b>' + esc(p.name) + '</b></span>' +
       '<button class="btn sm primary" data-act="ap-add" data-id="' + p.id + '">Legg til</button></div>').join('')
       : '<div class="empty">Alle i troppen er med.</div>') +
@@ -757,7 +840,7 @@ function renderSquad() {
       '<div class="prow tap" data-act="sq-menu" data-id="' + p.id + '">' +
       '<span class="num2">' + esc(p.number || '–') + '</span>' +
       '<span class="who"><b>' + esc(p.name) + '</b><small>' + fmt(b[p.id] ? b[p.id].sec : 0) + ' spilt i turneringen</small></span>' +
-      '<button class="dots" data-act="sq-menu" data-id="' + p.id + '">✎</button></div>').join('')
+      '<button class="dots" data-act="sq-menu" data-id="' + p.id + '" aria-label="Endre ' + esc(p.name) + '">✎</button></div>').join('')
     : '<div class="empty">Ingen spillere ennå. Legg dem inn over.</div>';
 }
 
@@ -810,7 +893,8 @@ function renderSetup() {
       '<p class="hint">Avslutt den pågående kampen før du starter en ny.</p>' +
       '<div class="rowbtns"><button class="btn" data-act="tab" data-tab="match">Gå til kampen</button></div></div>'
     : '';
-  if (!setup.name) $('#s-name').placeholder = 'Kamp ' + (T().matches.length + 1);
+  $('#s-name').placeholder = 'Kamp ' + (T().matches.length + 1);
+  $('#s-name').value = setup.name;
   $('#s-duration').value = setup.duration;
   $('#s-onfield').value = setup.onField;
   $('#s-periods').value = setup.periods;
@@ -819,9 +903,10 @@ function renderSetup() {
   $('#s-threshold').value = setup.threshold;
 
   const b = balances();
+  T().squad.forEach(p => { if (!setup.lineup[p.id]) setup.lineup[p.id] = { share: 1, locked: false }; });
   $('#setup-players').innerHTML = T().squad.length ? T().squad.map(p => {
-    const l = setup.lineup[p.id] || { share: 1, locked: false };
-    return '<div class="srow"><span class="num2" style="flex:none;width:34px;height:34px;border-radius:10px;background:var(--line);display:flex;align-items:center;justify-content:center;font-weight:800">' +
+    const l = setup.lineup[p.id];
+    return '<div class="srow"><span class="num2">' +
       esc(p.number || '–') + '</span>' +
       '<span class="who"><b>' + esc(p.name) + '</b><small class="' + balClass(b[p.id] ? b[p.id].bal : 0, setup.threshold) + '">saldo ' +
         fmtSign(b[p.id] ? b[p.id].bal : 0) + '</small></span>' +
@@ -847,6 +932,7 @@ function renderSetup() {
   $('#s-start').disabled = !!m || n === 0;
 }
 function readSetupNumbers() {
+  if (!setup) setupInit();
   const num = (sel, def, lo, hi) => {
     const v = parseInt($(sel).value, 10);
     return isNaN(v) ? def : clamp(v, lo, hi);
@@ -895,7 +981,7 @@ function renderStats() {
 
   let html = '';
   if (!T().squad.length) {
-    html = '<div class="card"><div class="empty">Ingen spillere enno.</div></div>';
+    html = '<div class="card"><div class="empty">Ingen spillere ennå.</div></div>';
   } else {
     const rows = T().squad.slice().sort((x, y) => b[x.id].bal - b[y.id].bal).map(p => {
       const o = b[p.id];
@@ -923,7 +1009,7 @@ function renderStats() {
         Math.round(m.durationSec / 60) + ' min' + (on ? ' · i gang' : m.finished ? ' · ferdig' : ' · ikke avsluttet') + '</small></span>' +
         (on ? '<button class="btn sm" data-act="tab" data-tab="match">Åpne</button>'
             : '<button class="btn sm" data-act="reopen" data-id="' + m.id + '">Åpne</button>') +
-        '<button class="dots" data-act="del-match" data-id="' + m.id + '">✕</button></div>';
+        '<button class="dots" data-act="del-match" data-id="' + m.id + '" aria-label="Slett ' + esc(m.name) + '">✕</button></div>';
     }).join('') : '<div class="empty">Ingen kamper registrert.</div>') + '</div></div>';
 
   let berget = '';
@@ -938,7 +1024,7 @@ function renderStats() {
       'vare på dem i stedet for å overskrive.</p>' : '') +
     '<div class="rowbtns"><button class="btn danger" data-act="new-cup">Ny turnering</button>' +
     '<button class="btn danger" data-act="wipe">Slett alt</button></div>' +
-    '<p class="hint">«Ny turnering» nullstiller spilletida, men beheld troppen.</p></div>';
+    '<p class="hint">«Ny turnering» nullstiller spilletida, men beholder troppen.</p></div>';
 
   $('#stats-body').innerHTML = html;
 }
@@ -946,6 +1032,7 @@ function renderStats() {
 /* ------------------------------ BACKUP ------------------------------ */
 
 function exportData() {
+  flush();
   const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -964,9 +1051,8 @@ function importData() {
         const p = migrate(JSON.parse(r.result));
         if (!p) throw new Error('feil format');
         const n = p.teams.length;
-        if (!confirm('Erstatte alle data med backupen? Den inneholder ' +
-          n + (n > 1 ? ' lag.' : ' lag.'))) return;
-        S = p; save(true); go('stats');
+        if (!confirm('Erstatte alle data med backupen? Den inneholder ' + n + ' lag.')) return;
+        S = p; resetView(); releaseWake(); save(true); go('stats');
       } catch (e) { alert('Kunne ikke lese filen: ' + e.message); }
     };
     r.readAsText(f);
@@ -1049,8 +1135,18 @@ document.addEventListener('click', ev => {
       if (!m) break;
       flush();
       const d = parseInt(t.dataset.d, 10);
-      m.sec[id] = Math.max(0, (m.sec[id] || 0) + d);
-      save(); lastSig = ''; playerSheet(id); paintAll();
+      const før = m.sec[id] || 0;
+      m.sec[id] = Math.max(0, før + d);
+      /* Bunnen er 0:00. Ber du om −1 min på en som har spilt 0:20, blir det
+         bare −0:20 – si fra, ellers ser knappen ut til å ikke virke.        */
+      const gjort = Math.round(m.sec[id] - før);
+      const kuttet = gjort !== d;
+      const note = !kuttet
+        ? (d > 0 ? '+' + fmt(d) + ' lagt til' : '−' + fmt(-d) + ' trukket fra')
+        : gjort === 0
+          ? 'Spilletida er allerede 0:00 – kan ikke gå lavere'
+          : 'Kunne bare trekke fra ' + fmt(Math.abs(gjort)) + ' – spilletida er nede i 0:00';
+      save(); lastSig = ''; paintPlayerSheet(id, note, kuttet); paintAll();
       break;
     }
 
@@ -1059,13 +1155,17 @@ document.addEventListener('click', ev => {
       if (!m) break;
       flush();
       m.durationSec = clamp(m.durationSec + parseInt(t.dataset.d, 10), 60, 240 * 60);
+      syncChime(m);
       save(); lastSig = ''; matchMenuSheet(); paintAll(); break;
     }
     case 'mm-clock': {
       if (!m) break;
       flush();
       m.elapsed = Math.max(0, m.elapsed + parseInt(t.dataset.d, 10));
-      m.overChime = overrun(m) > 0 ? 1 + Math.floor(overrun(m) / 60) : 0;
+      syncChime(m);
+      /* Klokka den retter på ligger bak arket. Vis den i arket, og blink.  */
+      const c2 = $('[data-mm-clock]');
+      if (c2) { c2.textContent = fmt(m.elapsed); flashEl(c2); }
       save(); lastSig = ''; paintAll(); break;
     }
     case 'mm-rename': {
@@ -1076,7 +1176,7 @@ document.addEventListener('click', ev => {
     }
     case 'mm-delete': {
       if (!m) break;
-      if (confirm('Slette kampen og all spilletid i han?')) {
+      if (confirm('Slette kampen og all spilletid i den?')) {
         T().matches = T().matches.filter(x => x.id !== m.id);
         T().currentId = null; save(true); closeSheet(); go('stats');
       }
@@ -1162,8 +1262,8 @@ document.addEventListener('click', ev => {
       if (!confirm('Slette laget ' + t2.name + ' med ' + t2.squad.length + ' spillere og ' +
         t2.matches.length + ' kamper? Dette kan ikke angres.')) break;
       S.teams = S.teams.filter(x => x.id !== id);
-      if (S.teamId === id) { S.teamId = S.teams[0].id; sel = null; setup = null; }
-      lastSig = ''; save(true); closeSheet(); paintAll();
+      if (S.teamId === id) S.teamId = S.teams[0].id;
+      resetView(); save(true); closeSheet(); paintAll();
       break;
     }
 
@@ -1175,7 +1275,7 @@ document.addEventListener('click', ev => {
       try { p = migrate(JSON.parse(raw)); } catch (e) {}
       if (!p) { alert('Klarte ikke å lese de bergede dataene.'); break; }
       if (!confirm('Erstatte alt med de bergede dataene?')) break;
-      S = p; save(true);
+      S = p; resetView(); releaseWake(); save(true);
       try { localStorage.removeItem(KEY + '-berget'); } catch (e) {}
       go('stats'); break;
     }
@@ -1183,11 +1283,11 @@ document.addEventListener('click', ev => {
     case 'import': importData(); break;
     case 'new-cup': {
       if (!confirm('Nullstille all spilletid for ' + T().name + ' og starte ny turnering? Troppen blir beholdt.')) break;
-      T().matches = []; T().currentId = null; save(true); paintAll(); break;
+      T().matches = []; T().currentId = null; resetView(); save(true); paintAll(); break;
     }
     case 'wipe': {
       if (!confirm('Slette ALLE data for alle lag, også troppene?')) break;
-      S = blank(); save(true); go('squad'); break;
+      S = blank(); resetView(); save(true); go('squad'); break;
     }
   }
 });
@@ -1204,9 +1304,15 @@ document.addEventListener('change', ev => {
       if (s <= 0) setup.start = setup.start.filter(x => x !== id);
       renderSetup(); break;
     }
-    case 'mm-interval': if (m) { m.interval = clamp(parseInt(t.value, 10) || 5, 1, 30); save(); lastSig = ''; } break;
-    case 'mm-maxswaps': if (m) { m.maxSwaps = clamp(parseInt(t.value, 10) || 2, 1, 11); save(); lastSig = ''; } break;
-    case 'mm-threshold': if (m) { m.threshold = clamp(parseInt(t.value, 10) || 0, 0, 600); save(); lastSig = ''; } break;
+    case 'mm-interval': case 'mm-maxswaps': case 'mm-threshold': {
+      if (!m) break;
+      const key = { 'mm-interval': 'interval', 'mm-maxswaps': 'maxSwaps', 'mm-threshold': 'threshold' }[t.dataset.act];
+      const lim = { interval: [1, 30], maxSwaps: [1, 11], threshold: [0, 600] }[key];
+      const v = parseInt(t.value, 10);
+      m[key] = isNaN(v) ? m[key] : clamp(v, lim[0], lim[1]);
+      t.value = m[key];
+      save(); lastSig = ''; break;
+    }
   }
 });
 
@@ -1233,8 +1339,10 @@ $('#s-all-out').addEventListener('click', () => {
 $('#s-start').addEventListener('click', startMatch);
 
 /* tropp */
-function addFromInputs() {
-  const nm = $('#q-name').value;
+function addFromInputs(text) {
+  /* text: limt inn med linjeskift. Et <input> stripper linjeskift, så
+     teksten må gå rett til tolkeren, ikke via feltet.                    */
+  const nm = text != null ? text : $('#q-name').value;
   const num = $('#q-number').value.trim();
   if (!nm.trim()) { $('#q-name').focus(); return; }
   const n = addPlayers(nm, num);
@@ -1245,6 +1353,12 @@ function addFromInputs() {
   }
 }
 $('#q-add').addEventListener('click', addFromInputs);
+$('#q-name').addEventListener('paste', e => {
+  const txt = e.clipboardData && e.clipboardData.getData('text');
+  if (!txt || !/\n/.test(txt.trim())) return;      // ett navn – la feltet ta det
+  e.preventDefault();
+  addFromInputs(txt);
+});
 $('#q-name').addEventListener('keydown', e => { if (e.key === 'Enter') addFromInputs(); });
 $('#q-number').addEventListener('keydown', e => { if (e.key === 'Enter') $('#q-name').focus(); });
 
@@ -1273,12 +1387,17 @@ function banner(msg) {
   setInterval(() => {
     const mm = cur();
     if (mm && mm.running) { flush(); save(); }
+    else releaseWake();
     if (S.tab === 'match') renderMatch();
   }, 250);
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { flush(); paintAll(); requestWake(); }
-    else { flush(); save(true); }
+    const mm = cur();
+    if (document.visibilityState === 'visible') {
+      flush(); lastSig = '';
+      if (S.tab === 'match') renderMatch();
+      if (mm && mm.running) requestWake();
+    } else { flush(); save(true); }
   });
   window.addEventListener('beforeunload', e => {
     flush(); save(true);
